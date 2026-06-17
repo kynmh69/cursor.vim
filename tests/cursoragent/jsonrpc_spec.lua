@@ -1,0 +1,145 @@
+--- tests/cursoragent/jsonrpc_spec.lua
+--- Tests for lua/cursoragent/acp/jsonrpc.lua
+
+local jsonrpc = require("cursoragent.acp.jsonrpc")
+
+describe("cursoragent.acp.jsonrpc", function()
+  before_each(function()
+    jsonrpc.reset_buffer()
+    jsonrpc.reset_id_counter()
+  end)
+
+  describe("encode_request()", function()
+    it("returns a framed string and an integer id", function()
+      local framed, id = jsonrpc.encode_request("initialize", { version = "1.0" })
+      assert.is_string(framed)
+      assert.is_number(id)
+      assert.is_true(id >= 1)
+    end)
+
+    it("includes Content-Length header", function()
+      local framed, _ = jsonrpc.encode_request("test/method", {})
+      assert.truthy(framed:match("^Content%-Length:"))
+    end)
+
+    it("body is valid JSON-RPC 2.0", function()
+      local framed, id = jsonrpc.encode_request("foo", { bar = 1 })
+      local body = framed:match("\r\n\r\n(.*)")
+      assert.is_string(body)
+      local msg = vim.json.decode(body)
+      assert.equals("2.0", msg.jsonrpc)
+      assert.equals(id, msg.id)
+      assert.equals("foo", msg.method)
+      assert.equals(1, msg.params.bar)
+    end)
+
+    it("increments id on each call", function()
+      local _, id1 = jsonrpc.encode_request("m1", nil)
+      local _, id2 = jsonrpc.encode_request("m2", nil)
+      assert.equals(id1 + 1, id2)
+    end)
+
+    it("Content-Length matches actual body byte length", function()
+      local framed, _ = jsonrpc.encode_request("test", { key = "value" })
+      local len_str, body = framed:match("Content%-Length: (%d+)\r\n\r\n(.*)")
+      assert.equals(tonumber(len_str), #body)
+    end)
+  end)
+
+  describe("encode_notification()", function()
+    it("produces a framed message with no id", function()
+      local framed = jsonrpc.encode_notification("shutdown", {})
+      assert.is_string(framed)
+      local body = framed:match("\r\n\r\n(.*)")
+      local msg = vim.json.decode(body)
+      assert.equals("2.0", msg.jsonrpc)
+      assert.is_nil(msg.id)
+      assert.equals("shutdown", msg.method)
+    end)
+  end)
+
+  describe("parse_message() — Content-Length framing", function()
+    it("parses a single complete message", function()
+      local _, id = jsonrpc.encode_request("ping", nil)
+      local body = vim.json.encode({ jsonrpc = "2.0", id = id, result = "pong" })
+      local raw = string.format("Content-Length: %d\r\n\r\n%s", #body, body)
+      local msgs = jsonrpc.parse_message(raw)
+      assert.equals(1, #msgs)
+      assert.equals("pong", msgs[1].result)
+    end)
+
+    it("parses multiple consecutive messages", function()
+      local bodies = {}
+      for i = 1, 3 do
+        local b = vim.json.encode({ jsonrpc = "2.0", id = i, result = i })
+        table.insert(bodies, string.format("Content-Length: %d\r\n\r\n%s", #b, b))
+      end
+      local raw = table.concat(bodies, "")
+      local msgs = jsonrpc.parse_message(raw)
+      assert.equals(3, #msgs)
+      assert.equals(1, msgs[1].result)
+      assert.equals(3, msgs[3].result)
+    end)
+
+    it("buffers partial messages across calls", function()
+      local body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = "ok" })
+      local raw = string.format("Content-Length: %d\r\n\r\n%s", #body, body)
+      -- Split in the middle
+      local half = math.floor(#raw / 2)
+      local part1 = raw:sub(1, half)
+      local part2 = raw:sub(half + 1)
+
+      local msgs1 = jsonrpc.parse_message(part1)
+      assert.equals(0, #msgs1)
+
+      local msgs2 = jsonrpc.parse_message(part2)
+      assert.equals(1, #msgs2)
+      assert.equals("ok", msgs2[1].result)
+    end)
+  end)
+
+  describe("parse_message() — newline-delimited JSON fallback", function()
+    it("parses newline-delimited JSON lines", function()
+      local line1 = vim.json.encode({ type = "text", content = "hello" })
+      local line2 = vim.json.encode({ type = "done" })
+      local raw = line1 .. "\n" .. line2 .. "\n"
+      local msgs = jsonrpc.parse_message(raw)
+      assert.equals(2, #msgs)
+      assert.equals("text", msgs[1].type)
+      assert.equals("done", msgs[2].type)
+    end)
+
+    it("skips empty lines", function()
+      local line = vim.json.encode({ ok = true })
+      local raw = "\n\n" .. line .. "\n\n"
+      local msgs = jsonrpc.parse_message(raw)
+      assert.equals(1, #msgs)
+      assert.is_true(msgs[1].ok)
+    end)
+  end)
+
+  describe("reset_buffer()", function()
+    it("clears accumulated partial data", function()
+      -- Feed partial data that cannot be parsed
+      jsonrpc.parse_message("Content-Length: 999\r\n\r\npartial")
+      -- Reset buffer
+      jsonrpc.reset_buffer()
+      -- Now feed a complete message — should parse cleanly
+      local body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = "fresh" })
+      local raw = string.format("Content-Length: %d\r\n\r\n%s", #body, body)
+      local msgs = jsonrpc.parse_message(raw)
+      assert.equals(1, #msgs)
+      assert.equals("fresh", msgs[1].result)
+    end)
+  end)
+
+  describe("ERROR_CODES", function()
+    it("defines standard JSON-RPC error codes", function()
+      assert.equals(-32700, jsonrpc.ERROR_CODES.PARSE_ERROR)
+      assert.equals(-32600, jsonrpc.ERROR_CODES.INVALID_REQUEST)
+      assert.equals(-32601, jsonrpc.ERROR_CODES.METHOD_NOT_FOUND)
+      assert.equals(-32602, jsonrpc.ERROR_CODES.INVALID_PARAMS)
+      assert.equals(-32603, jsonrpc.ERROR_CODES.INTERNAL_ERROR)
+    end)
+  end)
+end)
