@@ -157,6 +157,11 @@ cursoragent.nvim/
         └── external.lua            # external emulator fallback
 ```
 
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for
+development setup, how to run the tests, and the pull request workflow.
+
 ## License
 
 Apache License 2.0
